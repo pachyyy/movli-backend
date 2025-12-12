@@ -152,50 +152,87 @@ app.delete('/api/movies/:movieId', verifyToken, async (req, res) => {
   }
 });
 
-  // Access the chatbot
-  app.post('/api/chat', async (req, res) => {
-    try {
-      const Replicate = require("replicate");
-        const { prompt } = req.body;
+  // Access the chatbot, now protected and with history
+app.post('/api/chat', verifyToken, async (req, res) => {
+  try {
+    const { prompt } = req.body;
+    const { uid } = req; // User ID from token
 
-        if (!prompt) {
-            return res.status(400).json({ error: "Prompt is required." });
-        }
-
-        console.log('Checking for API Key:', process.env.REPLICATE_API_TOKEN); 
-
-        // Initialize Replicate with your API token from .env
-        const replicate = new Replicate({
-            auth: process.env.REPLICATE_API_TOKEN,
-        });
-
-        console.log("Running model with prompt:", prompt);
-
-        // Run the IBM Granite model
-        const output = await replicate.run(
-            "ibm-granite/granite-3.3-8b-instruct",
-            {
-                input: {
-                    prompt: prompt,
-                    // You can adjust other parameters here
-                    max_new_tokens: 1024 
-                }
-            }
-        );
-        
-        // The output is an array of strings, join them to form the full reply
-        const botReply = output.join("");
-
-        res.status(200).json({ reply: botReply });
-
-    } catch (error) {
-        console.error("Error with Replicate API:", error);
-        res.status(500).json({ error: "Failed to get a response from the chatbot." });
+    if (!prompt) {
+      return res.status(400).json({ error: "Prompt is required." });
     }
+
+    // --- Save user's message to Firestore ---
+    const userMessage = {
+      role: 'user',
+      content: prompt,
+      timestamp: admin.firestore.FieldValue.serverTimestamp()
+    };
+    await db.collection('users').doc(uid).collection('chatHistory').add(userMessage);
+
+    const Replicate = require("replicate");
+    console.log('Checking for API Key:', process.env.REPLICATE_API_TOKEN);
+
+    const replicate = new Replicate({
+      auth: process.env.REPLICATE_API_TOKEN,
+    });
+
+    console.log("Running model with prompt:", prompt);
+
+    const output = await replicate.run(
+      "ibm-granite/granite-3.3-8b-instruct",
+      {
+        input: {
+          prompt: prompt,
+          max_new_tokens: 1024
+        }
+      }
+    );
+
+    const botReply = output.join("");
+
+    // --- Save bot's reply to Firestore ---
+    const botMessage = {
+      role: 'bot',
+      content: botReply,
+      timestamp: admin.firestore.FieldValue.serverTimestamp()
+    };
+    await db.collection('users').doc(uid).collection('chatHistory').add(botMessage);
+
+    res.status(200).json({ reply: botReply });
+
+  } catch (error) {
+    console.error("Error with Replicate API or Firestore:", error);
+    res.status(500).json({ error: "Failed to get a response from the chatbot." });
+  }
+});
+
+// GET: Fetch chat history for the authenticated user
+app.get('/api/chat/history', verifyToken, async (req, res) => {
+  try {
+    const { uid } = req;
+
+    const historyRef = db.collection('users').doc(uid).collection('chatHistory').orderBy('timestamp', 'asc');
+    const snapshot = await historyRef.get();
+
+    if (snapshot.empty) {
+      return res.status(200).json([]);
+    }
+
+    let chatHistory = [];
+    snapshot.forEach(doc => {
+      chatHistory.push(doc.data());
+    });
+
+    res.status(200).json(chatHistory);
+  } catch (error) {
+    console.error("Error fetching chat history:", error);
+    res.status(500).send("Internal Server Error");
+  }
 });
 
 
 // --- Start Server ---
 app.listen(PORT, () => {
-  console.log(`Server is running on http://localhost:${PORT}`);
+  console.log(`Server is running on https://movli-backend.onrender.com:${PORT}`);
 });
